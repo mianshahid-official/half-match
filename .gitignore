@@ -1,7 +1,14 @@
 __pycache__/
 *.pyc
+*.zip
+sets/**/full/
+sets/**/halves/
 test_*.mp4
+odd-one-out.mp4
+curated_*.mp4
+3_rounds_*.mp4
 test_frames/
+test_frames_odd/
 extracted_frames/
 preview_frames/
 temp_audio*.wav

@@ -1,17 +1,18 @@
 """
 Acceptance Test Suite for 'Odd One Out'.
 Tests:
-1. Rejoin test (left+right halves rejoin to exact full picture for every pair)
+1. Rejoin test (left+right halves rejoin to exact full picture for all pairs)
 2. Default render (5 rounds, 1080x1920, 30fps, 39.5s, H.264 + AAC, non-silent audio, peak < 0 dB)
-3. --random 3 renders a 25.5s video with 3 rounds
-4. Empty categories (characters/, vegetables/) skipped, orphan lonely_pear-1.png warns & skipped
-5. Keyframes extraction & inspection (intro, guess, reveal, end card)
+3. Custom rounds & wait time render (e.g. 3 rounds, custom timing)
+4. Empty categories skipped, all populated categories discovered, orphan lonely_pear-1.png warns & skipped
+5. Keyframes extraction & inspection (intro, guess with timer/countdown, reveal with ring/tick/dimming, end card)
 6. App's existing 6 acceptance tests pass without regression
 """
 
 import os
 import sys
 import json
+import shutil
 import subprocess
 import numpy as np
 from PIL import Image
@@ -82,8 +83,8 @@ def run_acceptance_tests():
             r_img = Image.open(pair["right"]).convert("RGBA")
 
             full = odd_one_out.rejoin_halves(pair["left"], pair["right"])
-            assert full.width == l_img.width + r_img.width, "Width mismatch on rejoin"
-            assert full.height == max(l_img.height, r_img.height), "Height mismatch on rejoin"
+            assert full.width == l_img.width + r_img.width, f"Width mismatch on rejoin for {pair['name']}"
+            assert full.height == max(l_img.height, r_img.height), f"Height mismatch on rejoin for {pair['name']}"
 
             # Check left slice
             crop_l = full.crop((0, 0, l_img.width, l_img.height))
@@ -98,12 +99,12 @@ def run_acceptance_tests():
             rejoin_matches += 1
 
     print(f" - Verified {rejoin_matches}/{total_pairs} pairs rejoining pixel-identically with 0 diff.")
-    assert rejoin_matches >= 10, "Expected at least 10 sample pairs"
+    assert rejoin_matches >= 300, f"Expected at least 300 total pairs across all sets, found {rejoin_matches}"
     results["Test 1: Halves Rejoin Pixel-Identical"] = "PASSED"
     print(">>> TEST 1 PASSED\n")
 
     # -------------------------------------------------------------
-    # TEST 2: Default Render (5 rounds, 39.5s, 1080x1920, 30fps)
+    # TEST 2: Default Render (5 rounds, 5.0s wait, 2.0s reveal -> 39.5s)
     # -------------------------------------------------------------
     print("[TEST 2] Rendering default 5-round video (target: 39.5s)...")
     out_default = "test_odd_5rounds.mp4"
@@ -122,7 +123,7 @@ def run_acceptance_tests():
     print(f" - FPS: {fps_5:.1f} (Expected 30.0)")
     print(f" - Duration: {dur_5:.2f}s (Expected 39.5s)")
     print(f" - Video Codec: {v_stream['codec_name']} ({v_stream['pix_fmt']})")
-    print(f" - Audio Codec: {a_stream['codec_name']} ({a_stream['sample_rate']}Hz, {a_stream['bit_rate']} bps)")
+    print(f" - Audio Codec: {a_stream['codec_name']} ({a_stream['sample_rate']}Hz, {a_stream.get('bit_rate', 'N/A')} bps)")
     print(f" - Audio Stats: Non-silent={not_silent}, RMS={rms:.4f}, Peak={peak:.4f} (Peak < 1.0/0dB: {peak < 1.0})")
 
     assert v_stream["width"] == 1080 and v_stream["height"] == 1920, "Resolution mismatch"
@@ -137,53 +138,72 @@ def run_acceptance_tests():
     print(">>> TEST 2 PASSED\n")
 
     # -------------------------------------------------------------
-    # TEST 3: --random 3 (25.5s video)
+    # TEST 3: Custom Rounds & Custom Wait Time Render
     # -------------------------------------------------------------
-    print("[TEST 3] Rendering 3-round video (target: 25.5s)...")
-    out_3 = "test_odd_3rounds.mp4"
+    print("[TEST 3] Rendering custom 3-round video with custom wait time (wait: 4.0s, reveal: 1.5s -> 21.0s)...")
+    out_custom = "test_odd_custom.mp4"
+    custom_wait = 4.0
+    custom_reveal = 1.5
+    # Expected duration: 2.0 (intro) + 3 * (4.0 + 1.5) + 2.5 (end) = 21.0s
+    expected_dur = 2.0 + 3 * (custom_wait + custom_reveal) + 2.5
     rounds_3 = odd_one_out.build_random_rounds(cats, count=3)
-    odd_one_out.render_odd_one_out_video(rounds_3, bg_path=None, output_path=out_3)
+    odd_one_out.render_odd_one_out_video(
+        rounds_3,
+        bg_path=None,
+        output_path=out_custom,
+        wait_time_sec=custom_wait,
+        reveal_time_sec=custom_reveal
+    )
 
-    meta_3 = ffprobe_info(out_3)
-    v_3 = next(s for s in meta_3["streams"] if s["codec_type"] == "video")
-    a_3 = next(s for s in meta_3["streams"] if s["codec_type"] == "audio")
-    dur_3 = float(meta_3["format"]["duration"])
+    meta_custom = ffprobe_info(out_custom)
+    v_c = next(s for s in meta_custom["streams"] if s["codec_type"] == "video")
+    dur_c = float(meta_custom["format"]["duration"])
 
-    print(f"3-Round Video Verification:")
-    print(f" - Resolution: {v_3['width']}x{v_3['height']}")
-    print(f" - Duration: {dur_3:.2f}s (Expected 25.5s)")
+    print(f"Custom Timing Video Verification:")
+    print(f" - Resolution: {v_c['width']}x{v_c['height']}")
+    print(f" - Duration: {dur_c:.2f}s (Expected {expected_dur:.2f}s)")
 
-    assert v_3["width"] == 1080 and v_3["height"] == 1920
-    assert abs(dur_3 - 25.5) < 0.25, f"Expected 25.5s, got {dur_3}"
+    assert v_c["width"] == 1080 and v_c["height"] == 1920
+    assert abs(dur_c - expected_dur) < 0.25, f"Expected {expected_dur}s, got {dur_c}"
 
-    results["Test 3: 3 Rounds Render (25.5s)"] = "PASSED"
+    results["Test 3: Custom Rounds & Wait Time Render"] = "PASSED"
     print(">>> TEST 3 PASSED\n")
 
     # -------------------------------------------------------------
-    # TEST 4: Empty categories skipped & orphan warning
+    # TEST 4: Category Discovery & Empty Category Handling
     # -------------------------------------------------------------
-    print("[TEST 4] Testing empty category skipping and orphan lonely_pear warning...")
-    # Capture stdout during discovery
+    print("[TEST 4] Testing category discovery, empty category skipping, and orphan warning...")
     import io
     from contextlib import redirect_stdout
 
+    # Create a temporary empty category folder to test skipping
+    temp_empty_dir = os.path.join("sets", "temp_empty_test_cat")
+    os.makedirs(temp_empty_dir, exist_ok=True)
+
     buf = io.StringIO()
-    with redirect_stdout(buf):
-        discovered = odd_one_out.discover_categories("sets")
-    printed_log = buf.getvalue()
+    try:
+        with redirect_stdout(buf):
+            discovered = odd_one_out.discover_categories("sets")
+        printed_log = buf.getvalue()
+    finally:
+        if os.path.exists(temp_empty_dir):
+            shutil.rmtree(temp_empty_dir)
 
     print("Discovery output log:")
     print(printed_log.strip())
 
-    # Verify empty categories are skipped
-    assert "characters" not in discovered, "Empty category 'characters' should be skipped"
-    assert "vegetables" not in discovered, "Empty category 'vegetables' should be skipped"
-    assert "fruits" in discovered and "cars" in discovered, "Populated categories missing"
+    # Verify all 4 populated categories are discovered
+    for required_cat in ["cars", "characters", "fruits", "vegetables"]:
+        assert required_cat in discovered, f"Expected category '{required_cat}' to be discovered"
+        assert len(discovered[required_cat]) > 10, f"Expected >10 items in '{required_cat}', got {len(discovered[required_cat])}"
+
+    # Verify empty category was skipped
+    assert "temp_empty_test_cat" not in discovered, "Empty category should be skipped"
 
     # Verify orphan lonely_pear warning
     assert "lonely_pear" in printed_log and "skipped" in printed_log, "Orphan lonely_pear warning not printed"
 
-    results["Test 4: Empty Categories Skipped & Orphan Warning"] = "PASSED"
+    results["Test 4: Category Discovery, Empty Skipped, Orphan Warned"] = "PASSED"
     print(">>> TEST 4 PASSED\n")
 
     # -------------------------------------------------------------
@@ -212,15 +232,13 @@ def run_acceptance_tests():
     arr_guess = np.array(im_guess)
     for pos_i, (gx, gy) in enumerate(odd_one_out.GRID_POSITIONS):
         cell_patch = arr_guess[gy+50:gy+390, gx+50:gx+390]
-        # Check non-background variance in card area
         card_variance = np.var(cell_patch)
         print(f"   Pos {pos_i} ({gx}, {gy}) item card variance: {card_variance:.1f}")
-        assert card_variance > 50.0, f"Item at pos {pos_i} missing or blank"
+        assert card_variance > 50.0, f"Item at pos {pos_i} missing or blank in guess frame"
 
     # Inspect reveal frame: verify green ring / tick presence AND all 4 items visible
     im_reveal = Image.open(f_reveal)
     arr_reveal = np.array(im_reveal)
-    # Check that all 4 items remain visible in the reveal frame
     for pos_i, (gx, gy) in enumerate(odd_one_out.GRID_POSITIONS):
         cell_patch_rev = arr_reveal[gy+50:gy+390, gx+50:gx+390]
         card_var_rev = np.var(cell_patch_rev)

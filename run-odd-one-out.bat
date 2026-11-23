@@ -45,10 +45,30 @@ if %ERRORLEVEL% neq 0 (
     )
 )
 
-:: 4. Run odd_one_out.py
+:: 4. Prompt for settings if run interactively (no arguments provided)
+set "ROUNDS_ARG="
+set "WAIT_ARG="
+
+if "%~1"=="" (
+    echo ---------------------------------------------------
+    echo Video Settings (Press Enter to use defaults)
+    echo ---------------------------------------------------
+    set /p "INPUT_ROUNDS=Number of rounds [default: 5]: "
+    set /p "INPUT_WAIT=Wait time before reveal in seconds [default: 5.0]: "
+    echo.
+)
+
+if not "%INPUT_ROUNDS%"=="" (
+    set ROUNDS_ARG=--rounds %INPUT_ROUNDS%
+)
+if not "%INPUT_WAIT%"=="" (
+    set WAIT_ARG=--wait-time %INPUT_WAIT%
+)
+
+:: 5. Run odd_one_out.py
 echo Starting Odd One Out video generation...
 echo.
-python odd_one_out.py %*
+python odd_one_out.py %ROUNDS_ARG% %WAIT_ARG% %*
 
 if %ERRORLEVEL% neq 0 (
     echo.

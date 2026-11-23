@@ -3,11 +3,11 @@ Odd One Out — Kids Video Generator (Standalone CLI Renderer).
 
 Turns image halves in sets/ into viral "Odd One Out" 2x2 grid quiz videos:
 - 1080x1920, 30fps, H.264 + AAC MP4
-- 4 items per round (3 from one category + 1 from another category)
-- 5s guess phase (countdown number + shrinking timer bar)
-- 2s reveal phase (dim 3 wrong, green ring + tick on odd item, reason text)
-- 2s intro card, 2.5s end card (5 rounds = 39.5s total)
-- Purely synthesized audio bed + pop / tick / ding / fanfare SFX
+- Configurable number of rounds (--rounds N, default: 5)
+- Configurable wait time between reveals (--wait-time SECONDS, default: 5.0)
+- Configurable reveal duration (--reveal-time SECONDS, default: 2.0)
+- Enhanced viral kids graphics: vibrant typography, drop shadows, glowing badges, gradient timer
+- Purely synthesized audio bed + landing pop / countdown ticks / reveal ding / fanfare SFX
 """
 
 import os
@@ -21,19 +21,10 @@ import argparse
 import subprocess
 import wave
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # =====================================================================
 # EDITABLE ROUNDS LIST (used with --sample flag)
-# Format for each round:
-# {
-#     "majority_cat": "fruits",       # category of the 3 items
-#     "majority_items": ["apple", "banana", "orange"],  # 3 item slugs
-#     "odd_cat": "vegetables",        # category of the odd item
-#     "odd_item": "carrot",           # 1 odd item slug
-#     "odd_pos": 1                    # 0=TL, 1=TR, 2=BL, 3=BR (or None to randomize)
-# }
-# Note: These example rounds require the full image pack halves in sets/.
 # =====================================================================
 ROUNDS = [
     # Round 1: 3 fruits + 1 vegetable (Carrot is a VEGETABLE!)
@@ -90,15 +81,15 @@ CATEGORY_WORD_MAP = {
     "character": "CHARACTER"
 }
 
-# Constants
+# Canvas & Render Constants
 CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
 FPS = 30
 SAMPLE_RATE = 44100
 
 INTRO_DURATION_SEC = 2.0
-GUESS_DURATION_SEC = 5.0
-REVEAL_DURATION_SEC = 2.0
+DEFAULT_WAIT_TIME_SEC = 5.0
+DEFAULT_REVEAL_TIME_SEC = 2.0
 END_DURATION_SEC = 2.5
 
 # 2x2 Grid Layout
@@ -141,9 +132,17 @@ def get_font(size):
     except Exception:
         return ImageFont.load_default()
 
-def draw_text_with_outline(draw, text, xy, font, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), outline_width=3, anchor="mm"):
-    """Draws white text with thick black outline so it reads clearly on any background."""
-    draw.text(xy, text, font=font, fill=fill, stroke_width=outline_width, stroke_fill=outline, anchor=anchor)
+def draw_text_with_shadow(draw, text, xy, font, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), outline_width=4, shadow_offset=(3, 4), shadow_color=(0, 0, 0, 180), anchor="mm"):
+    """
+    Renders punchy cartoon-style typography with drop shadow and outline.
+    """
+    x, y = xy
+    sx, sy = shadow_offset
+    # Draw drop shadow
+    if shadow_color:
+        draw.text((x + sx, y + sy), text, font=font, fill=shadow_color, stroke_width=outline_width, stroke_fill=shadow_color, anchor=anchor)
+    # Draw main text with outline
+    draw.text((x, y), text, font=font, fill=fill, stroke_width=outline_width, stroke_fill=outline, anchor=anchor)
 
 def rejoin_halves(left_path, right_path):
     """
@@ -169,7 +168,6 @@ def get_category_word(cat_name):
     cat_lower = cat_name.lower().strip()
     if cat_lower in CATEGORY_WORD_MAP:
         return CATEGORY_WORD_MAP[cat_lower]
-    # Fallback heuristic: strip trailing 's' if any
     if cat_lower.endswith("s"):
         return cat_lower[:-1].upper()
     return cat_lower.upper()
@@ -189,7 +187,11 @@ def discover_categories(sets_dir="sets"):
 
     for sub in sorted(subdirs):
         cat_path = os.path.join(sets_dir, sub)
-        files = os.listdir(cat_path)
+        # Scan files directly in category folder
+        try:
+            files = [f for f in os.listdir(cat_path) if os.path.isfile(os.path.join(cat_path, f))]
+        except Exception:
+            continue
 
         left_files = {}
         right_files = {}
@@ -260,32 +262,36 @@ def prepare_background(bg_path, target_w=CANVAS_WIDTH, target_h=CANVAS_HEIGHT):
         except Exception as e:
             print(f"[Warning] Failed to load background '{bg_path}': {e}")
 
-    # Fallback pleasant kids gradient background
+    # Fallback vibrant sunset sky kids background
     bg = Image.new("RGB", (target_w, target_h))
     arr = np.zeros((target_h, target_w, 3), dtype=np.uint8)
     for y in range(target_h):
         t = y / float(target_h)
-        arr[y, :, 0] = int((1 - t) * 90 + t * 40)
-        arr[y, :, 1] = int((1 - t) * 160 + t * 90)
-        arr[y, :, 2] = int((1 - t) * 240 + t * 180)
+        arr[y, :, 0] = int((1 - t) * 79 + t * 30)
+        arr[y, :, 1] = int((1 - t) * 70 + t * 58)
+        arr[y, :, 2] = int((1 - t) * 229 + t * 138)
     return Image.fromarray(arr)
 
 def prepare_grid_item_card(rejoined_img, cell_size=CELL_SIZE, is_dimmed=False):
     """
-    Renders an item inside a 440x440 rounded translucent card.
-    If is_dimmed=True, applies a semi-transparent darkening layer over the item
-    so the item remains clearly visible but dimmed.
+    Renders an item inside a 440x440 glossy rounded card with drop shadow.
+    If is_dimmed=True, applies a semi-transparent darkening overlay so the item
+    remains clearly visible through the dimming.
     """
     card = Image.new("RGBA", (cell_size, cell_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(card)
-    
-    # Rounded card backing
-    card_bg_color = (255, 255, 255, 220)
-    card_outline_color = (255, 255, 255, 255)
-    draw.rounded_rectangle([0, 0, cell_size - 1, cell_size - 1], radius=24, fill=card_bg_color, outline=card_outline_color, width=3)
 
-    # Scale rejoined item to fit inside with padding
-    pad = 32
+    # Card backing
+    draw.rounded_rectangle(
+        [0, 0, cell_size - 1, cell_size - 1],
+        radius=26,
+        fill=(255, 255, 255, 230),
+        outline=(255, 255, 255, 255),
+        width=3
+    )
+
+    # Scale item with padding
+    pad = 28
     max_dim = cell_size - pad * 2
     item_copy = rejoined_img.copy()
     item_copy.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
@@ -298,17 +304,18 @@ def prepare_grid_item_card(rejoined_img, cell_size=CELL_SIZE, is_dimmed=False):
     if is_dimmed:
         dim_layer = Image.new("RGBA", (cell_size, cell_size), (0, 0, 0, 0))
         d_dim = ImageDraw.Draw(dim_layer)
-        d_dim.rounded_rectangle([0, 0, cell_size - 1, cell_size - 1], radius=24, fill=(15, 23, 42, 150))
+        d_dim.rounded_rectangle([0, 0, cell_size - 1, cell_size - 1], radius=26, fill=(15, 23, 42, 160))
         card = Image.alpha_composite(card, dim_layer)
 
     return card
 
-def draw_green_tick_badge(size=76):
-    """Creates a circular green badge with a clean white checkmark."""
+def draw_green_tick_badge(size=80):
+    """Creates a circular green badge with drop shadow and checkmark."""
     badge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(badge)
-    pad = 2
-    draw.ellipse([pad, pad, size - pad, size - pad], fill=(34, 197, 94, 255), outline=(255, 255, 255, 255), width=3)
+    # Circle
+    draw.ellipse([2, 2, size - 3, size - 3], fill=(34, 197, 94, 255), outline=(255, 255, 255, 255), width=4)
+    # Checkmark
     p1 = (int(size * 0.28), int(size * 0.52))
     p2 = (int(size * 0.44), int(size * 0.68))
     p3 = (int(size * 0.72), int(size * 0.32))
@@ -362,15 +369,14 @@ def synth_fanfare_sfx(sample_rate=SAMPLE_RATE):
     dur = 1.6
     n = int(dur * sample_rate)
     out = np.zeros(n, dtype=np.float32)
-    # Triumphant notes: G4, C5, E5, G5, C6 (chord)
     notes = [
         (0.00, 392.00, 0.14),
         (0.14, 523.25, 0.14),
         (0.28, 659.25, 0.14),
         (0.42, 783.99, 0.22),
-        (0.64, 1046.50, 0.90), # sustained high C
-        (0.64, 1318.51, 0.90), # harmonized E6
-        (0.64, 1567.98, 0.90), # harmonized G6
+        (0.64, 1046.50, 0.90),
+        (0.64, 1318.51, 0.90),
+        (0.64, 1567.98, 0.90),
     ]
     for start_t, freq, note_dur in notes:
         start_idx = int(start_t * sample_rate)
@@ -387,7 +393,6 @@ def synth_music_bed(total_sec, sample_rate=SAMPLE_RATE):
     n = int(total_sec * sample_rate)
     bed = np.zeros(n, dtype=np.float32)
 
-    # Chords: C (261.6), G (196.0), Am (220.0), F (174.6)
     chord_bass = [65.41, 49.00, 55.00, 43.65] # C2, G1, A1, F1
     arpeggio = [
         [523.25, 659.25, 783.99, 1046.50], # C5, E5, G5, C6
@@ -395,8 +400,8 @@ def synth_music_bed(total_sec, sample_rate=SAMPLE_RATE):
         [440.00, 523.25, 659.25, 880.00],  # A4, C5, E5, A5
         [349.23, 440.00, 523.25, 698.46],  # F4, A4, C5, F5
     ]
-    chord_len = 2.0  # 2.0s per chord
-    note_len = 0.50  # 4 notes per chord
+    chord_len = 2.0
+    note_len = 0.50
 
     total_chords = int(math.ceil(total_sec / chord_len)) + 1
     for c_i in range(total_chords):
@@ -472,24 +477,22 @@ def build_sample_rounds(categories):
     rounds_data = []
     last_pos = -1
 
-    for r_idx, r in enumerate(ROUNDS):
+    for r in ROUNDS:
         m_cat = r["majority_cat"]
         o_cat = r["odd_cat"]
-        
-        # Check if categories and items exist
+
         if m_cat in categories and o_cat in categories:
             cat_map_m = {it["name"]: it for it in categories[m_cat]}
             cat_map_o = {it["name"]: it for it in categories[o_cat]}
-            
+
             maj_items = [cat_map_m[name] for name in r["majority_items"] if name in cat_map_m]
             odd_item = cat_map_o.get(r["odd_item"])
-            
-            # If any specific item is missing, fill from available
+
             if len(maj_items) < 3 and len(categories[m_cat]) >= 3:
                 maj_items = categories[m_cat][:3]
             if not odd_item and categories[o_cat]:
                 odd_item = categories[o_cat][0]
-                
+
             if len(maj_items) == 3 and odd_item:
                 pos = r.get("odd_pos")
                 if pos is None or pos == last_pos:
@@ -504,7 +507,6 @@ def build_sample_rounds(categories):
                 })
                 continue
 
-        # If categories don't exist in sample repo, build a dynamic fallback round
         fallback_r = build_random_rounds(categories, count=1)[0]
         rounds_data.append(fallback_r)
 
@@ -514,30 +516,30 @@ def build_sample_rounds(categories):
 # VIDEO GENERATION ENGINE
 # =====================================================================
 
-def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", progress_cb=None):
+def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", wait_time_sec=DEFAULT_WAIT_TIME_SEC, reveal_time_sec=DEFAULT_REVEAL_TIME_SEC, progress_cb=None):
     """
-    Renders the complete Odd One Out video.
+    Renders the complete Odd One Out video with configurable wait and reveal timing.
     """
     if not check_ffmpeg():
         print("\n[ERROR] FFmpeg is missing from your system PATH!")
-        print("To install FFmpeg on Windows:")
+        print("Install FFmpeg with:")
         print("  winget install Gyan.FFmpeg")
-        print("or download from https://www.gyan.dev/ffmpeg/builds/ and add to PATH.\n")
+        print("or download from https://www.gyan.dev/ffmpeg/builds/\n")
         sys.exit(1)
 
     num_rounds = len(rounds)
-    round_duration_sec = GUESS_DURATION_SEC + REVEAL_DURATION_SEC
+    round_duration_sec = float(wait_time_sec) + float(reveal_time_sec)
     total_sec = INTRO_DURATION_SEC + (num_rounds * round_duration_sec) + END_DURATION_SEC
     total_frames = int(round(total_sec * FPS))
 
     if progress_cb:
-        progress_cb(0.05, "Preloading assets and rejoining halves...")
+        progress_cb(0.05, "Preloading assets and preparing cards...")
 
     # Load Background
     bg_img = prepare_background(bg_path)
 
     # Preload and rejoin all round items
-    tick_badge = draw_green_tick_badge(76)
+    tick_badge = draw_green_tick_badge(84)
     rounds_prepared = []
 
     for r in rounds:
@@ -551,7 +553,7 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
             "is_odd": True
         }
 
-        # Place majority items in the other 3 positions
+        # Place majority items in other 3 positions
         maj_idx = 0
         for p in range(4):
             if p != r["odd_pos"]:
@@ -565,11 +567,9 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
                 }
                 maj_idx += 1
 
-        # Pre-render standard cards and dimmed cards
         cards_normal = [prepare_grid_item_card(it["full"], CELL_SIZE, is_dimmed=False) for it in grid_items]
         cards_dimmed = [prepare_grid_item_card(it["full"], CELL_SIZE, is_dimmed=True) for it in grid_items]
 
-        # Prepare reason text
         odd_display_name = format_slug_name(r["odd_item"]["name"])
         odd_cat_word = get_category_word(r["odd_cat"])
         reason_text = f"{odd_display_name} is a {odd_cat_word}!"
@@ -579,6 +579,8 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
             "cards_normal": cards_normal,
             "cards_dimmed": cards_dimmed,
             "odd_pos": r["odd_pos"],
+            "odd_name": odd_display_name,
+            "odd_cat_word": odd_cat_word,
             "reason_text": reason_text
         })
 
@@ -586,9 +588,8 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
     # Synthesize Audio Track
     # -------------------------------------------------------------
     if progress_cb:
-        progress_cb(0.12, "Composing synthesized audio bed and SFX...")
+        progress_cb(0.12, "Composing synthesized soundtrack & SFX...")
 
-    total_samples = int(total_sec * SAMPLE_RATE)
     audio_mix = synth_music_bed(total_sec, SAMPLE_RATE)
 
     pop_sfx = synth_pop_sfx(SAMPLE_RATE)
@@ -599,24 +600,25 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
     # Schedule SFX across timeline
     for r_idx in range(num_rounds):
         round_start_t = INTRO_DURATION_SEC + (r_idx * round_duration_sec)
-        
-        # Pop when items land at round start
+
+        # Pop when items appear
         mix_audio(audio_mix, pop_sfx, int(round_start_t * SAMPLE_RATE), volume=0.85)
 
-        # Tick at each countdown second (1s, 2s, 3s, 4s, 5s)
-        for s in range(5):
+        # Countdown ticks for each second of wait_time
+        num_ticks = int(math.floor(wait_time_sec))
+        for s in range(num_ticks):
             t_tick = round_start_t + s
             mix_audio(audio_mix, tick_sfx, int(t_tick * SAMPLE_RATE), volume=0.75)
 
-        # Ding on reveal (at 5.0s into the round)
-        t_reveal = round_start_t + GUESS_DURATION_SEC
+        # Ding on reveal
+        t_reveal = round_start_t + wait_time_sec
         mix_audio(audio_mix, ding_sfx, int(t_reveal * SAMPLE_RATE), volume=1.0)
 
     # Fanfare on end card
     end_card_t = INTRO_DURATION_SEC + (num_rounds * round_duration_sec)
     mix_audio(audio_mix, fanfare_sfx, int(end_card_t * SAMPLE_RATE), volume=1.0)
 
-    # Normalise audio so max volume stays below 0 dB (no clipping)
+    # Normalize audio cleanly below 0 dB
     max_amp = np.max(np.abs(audio_mix))
     if max_amp > 0:
         target_peak = 0.88 # -1.1 dBFS
@@ -661,46 +663,58 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
     stderr_temp = tempfile.TemporaryFile()
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stderr_temp)
 
-    # Fonts
-    font_title_intro = get_font(74)
-    font_sub_intro = get_font(46)
-    font_note_intro = get_font(38)
+    # High-impact fonts
+    font_main_title = get_font(72)
+    font_sub_title = get_font(44)
+    font_note = get_font(38)
 
-    font_header_title = get_font(56)
-    font_header_sub = get_font(42)
-    font_question = get_font(46)
-    font_countdown = get_font(110)
-    font_reason = get_font(52)
-
-    font_end_title = get_font(58)
-    font_end_sub = get_font(46)
-    font_end_note = get_font(40)
+    font_header_title = get_font(58)
+    font_badge = get_font(38)
+    font_question = get_font(48)
+    font_countdown = get_font(120)
+    font_reason_main = get_font(52)
 
     try:
         intro_end_frame = int(round(INTRO_DURATION_SEC * FPS))
         round_len_frames = int(round(round_duration_sec * FPS))
-        guess_len_frames = int(round(GUESS_DURATION_SEC * FPS))
+        guess_len_frames = int(round(wait_time_sec * FPS))
 
         for f in range(total_frames):
             frame = bg_img.copy()
             draw = ImageDraw.Draw(frame)
 
-            # 1. INTRO CARD (0 to 2s)
+            # ---------------------------------------------------------
+            # 1. INTRO CARD (0.0s to 2.0s)
+            # ---------------------------------------------------------
             if f < intro_end_frame:
-                # Decorative dark card backing in center
-                draw.rounded_rectangle([100, 560, 980, 1140], radius=32, fill=(15, 23, 42, 220), outline=(56, 189, 248, 255), width=4)
-                draw_text_with_outline(draw, "ODD ONE OUT", (540, 680), font_title_intro, fill=(255, 255, 255), outline=(0, 0, 0), outline_width=5)
-                draw_text_with_outline(draw, "Can you spot it?", (540, 810), font_sub_intro, fill=(254, 240, 138), outline=(0, 0, 0), outline_width=4)
-                draw_text_with_outline(draw, f"{num_rounds} rounds - comment your score!", (540, 950), font_note_intro, fill=(241, 245, 249), outline=(0, 0, 0), outline_width=3)
+                # Translucent dark glassmorphic card with gradient border
+                draw.rounded_rectangle([90, 520, 990, 1160], radius=36, fill=(15, 23, 42, 230), outline=(56, 189, 248, 255), width=5)
+                # Inner decorative glow
+                draw.rounded_rectangle([102, 532, 978, 1148], radius=28, outline=(14, 165, 233, 100), width=2)
 
+                draw_text_with_shadow(draw, "ODD ONE OUT", (540, 660), font_main_title, fill=(255, 255, 255), outline=(15, 23, 42), outline_width=6)
+                draw_text_with_shadow(draw, "Can you spot it?", (540, 800), font_sub_title, fill=(253, 224, 71), outline=(15, 23, 42), outline_width=5)
+                
+                # Pill indicator for rounds
+                draw.rounded_rectangle([240, 915, 840, 1005], radius=26, fill=(30, 41, 59, 240), outline=(250, 204, 21, 255), width=3)
+                draw_text_with_shadow(draw, f"{num_rounds} Rounds — Comment Score!", (540, 960), font_note, fill=(248, 250, 252), outline=(15, 23, 42), outline_width=4)
+
+            # ---------------------------------------------------------
             # 2. END CARD (Last 2.5s)
+            # ---------------------------------------------------------
             elif f >= (total_frames - int(round(END_DURATION_SEC * FPS))):
-                draw.rounded_rectangle([100, 560, 980, 1160], radius=32, fill=(15, 23, 42, 225), outline=(74, 222, 128, 255), width=4)
-                draw_text_with_outline(draw, "How many did you get right?", (540, 680), font_end_title, fill=(255, 255, 255), outline=(0, 0, 0), outline_width=5)
-                draw_text_with_outline(draw, "Comment your score!", (540, 830), font_end_sub, fill=(250, 204, 21), outline=(0, 0, 0), outline_width=4)
-                draw_text_with_outline(draw, "Follow for more!", (540, 970), font_end_note, fill=(56, 189, 248), outline=(0, 0, 0), outline_width=4)
+                draw.rounded_rectangle([90, 520, 990, 1160], radius=36, fill=(15, 23, 42, 235), outline=(34, 197, 94, 255), width=5)
+                draw.rounded_rectangle([102, 532, 978, 1148], radius=28, outline=(74, 222, 128, 100), width=2)
 
-            # 3. ROUNDS (5s guess + 2s reveal)
+                draw_text_with_shadow(draw, "How many did you get?", (540, 660), font_main_title, fill=(255, 255, 255), outline=(15, 23, 42), outline_width=6)
+                draw_text_with_shadow(draw, "Comment your score!", (540, 810), font_sub_title, fill=(250, 204, 21), outline=(15, 23, 42), outline_width=5)
+
+                draw.rounded_rectangle([280, 925, 800, 1015], radius=26, fill=(30, 41, 59, 240), outline=(56, 189, 248, 255), width=3)
+                draw_text_with_shadow(draw, "Follow for more!", (540, 970), font_note, fill=(56, 189, 248), outline=(15, 23, 42), outline_width=4)
+
+            # ---------------------------------------------------------
+            # 3. QUIZ ROUNDS
+            # ---------------------------------------------------------
             else:
                 round_f = f - intro_end_frame
                 r_idx = min(int(round_f // round_len_frames), num_rounds - 1)
@@ -709,67 +723,84 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
 
                 r_data = rounds_prepared[r_idx]
 
-                # Top Header Banner
-                draw_text_with_outline(draw, "ODD ONE OUT", (540, 110), font_header_title, fill=(255, 255, 255), outline=(0, 0, 0), outline_width=4)
-                draw_text_with_outline(draw, f"ROUND {r_idx + 1} / {num_rounds}", (540, 185), font_header_sub, fill=(254, 240, 138), outline=(0, 0, 0), outline_width=3)
+                # Top Title Banner
+                draw_text_with_shadow(draw, "ODD ONE OUT", (540, 105), font_header_title, fill=(255, 255, 255), outline=(15, 23, 42), outline_width=5)
 
-                # Render 2x2 Grid Items
+                # Round Pill Badge
+                badge_w = 340
+                badge_h = 58
+                bx1 = 540 - badge_w // 2
+                by1 = 160
+                draw.rounded_rectangle([bx1, by1, bx1 + badge_w, by1 + badge_h], radius=22, fill=(15, 23, 42, 220), outline=(250, 204, 21, 255), width=3)
+                draw_text_with_shadow(draw, f"ROUND {r_idx + 1} / {num_rounds}", (540, by1 + badge_h // 2), font_badge, fill=(253, 224, 71), outline=(15, 23, 42), outline_width=3)
+
+                # Render 2x2 Grid with Soft Shadows
                 for pos_idx in range(4):
                     gx, gy = GRID_POSITIONS[pos_idx]
                     is_odd_item = (pos_idx == r_data["odd_pos"])
 
+                    # Draw soft card drop shadow
+                    draw.rounded_rectangle([gx + 4, gy + 8, gx + CELL_SIZE + 4, gy + CELL_SIZE + 8], radius=28, fill=(0, 0, 0, 75))
+
                     if not is_reveal:
-                        # Guess phase: all 4 items look crisp and normal
+                        # Guess phase: all 4 cards appear normal
                         frame.paste(r_data["cards_normal"][pos_idx], (gx, gy), r_data["cards_normal"][pos_idx])
                     else:
-                        # Reveal phase: dim the 3 wrong items
+                        # Reveal phase: highlight odd item, dim others
                         if is_odd_item:
-                            # Odd item stands out brightly
                             frame.paste(r_data["cards_normal"][pos_idx], (gx, gy), r_data["cards_normal"][pos_idx])
-                            # Draw thick green ring around odd item's card
-                            draw.rounded_rectangle([gx, gy, gx + CELL_SIZE - 1, gy + CELL_SIZE - 1], radius=24, outline=(34, 197, 94, 255), width=10)
-                            # Draw green tick badge at top-right corner of card
-                            frame.paste(tick_badge, (gx + CELL_SIZE - 66, gy - 12), tick_badge)
+                            # Outer soft glow ring
+                            draw.rounded_rectangle([gx - 4, gy - 4, gx + CELL_SIZE + 3, gy + CELL_SIZE + 3], radius=30, outline=(74, 222, 128, 120), width=6)
+                            # Inner thick vibrant green ring
+                            draw.rounded_rectangle([gx, gy, gx + CELL_SIZE - 1, gy + CELL_SIZE - 1], radius=26, outline=(34, 197, 94, 255), width=10)
+                            # Green tick badge
+                            frame.paste(tick_badge, (gx + CELL_SIZE - 70, gy - 14), tick_badge)
                         else:
                             frame.paste(r_data["cards_dimmed"][pos_idx], (gx, gy), r_data["cards_dimmed"][pos_idx])
 
                 # Bottom Controls
                 if not is_reveal:
-                    # Guess phase: Question
-                    draw_text_with_outline(draw, "Which one is different?", (540, 1310), font_question, fill=(255, 255, 255), outline=(0, 0, 0), outline_width=4)
+                    # Question Pill Banner
+                    draw.rounded_rectangle([140, 1270, 940, 1365], radius=26, fill=(15, 23, 42, 225), outline=(56, 189, 248, 255), width=3)
+                    draw_text_with_shadow(draw, "Which one is different?", (540, 1317), font_question, fill=(255, 255, 255), outline=(15, 23, 42), outline_width=4)
 
-                    # Big Countdown Number (5, 4, 3, 2, 1)
+                    # Big Countdown Number (in circular glowing badge)
                     sec_elapsed = f_in_round / float(FPS)
-                    countdown_num = max(1, 5 - int(sec_elapsed))
-                    draw_text_with_outline(draw, str(countdown_num), (540, 1445), font_countdown, fill=(250, 204, 21), outline=(0, 0, 0), outline_width=6)
+                    total_countdown = max(1, int(wait_time_sec))
+                    countdown_num = max(1, total_countdown - int(sec_elapsed))
 
-                    # Shrinking Timer Bar
-                    bar_w = 800
-                    bar_h = 24
-                    bar_x = 140
-                    bar_y = 1550
+                    draw.ellipse([460, 1385, 620, 1545], fill=(15, 23, 42, 235), outline=(250, 204, 21, 255), width=5)
+                    draw_text_with_shadow(draw, str(countdown_num), (540, 1465), font_countdown, fill=(253, 224, 71), outline=(15, 23, 42), outline_width=6)
+
+                    # Animated Shrinking Timer Bar
+                    bar_w = 820
+                    bar_h = 26
+                    bar_x = 130
+                    bar_y = 1575
 
                     time_left_frac = max(0.0, 1.0 - (f_in_round / float(guess_len_frames)))
                     fill_w = int(bar_w * time_left_frac)
 
-                    # Timer background
-                    draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], radius=12, fill=(30, 41, 59, 210), outline=(71, 85, 105, 255), width=2)
+                    # Outer bar track
+                    draw.rounded_rectangle([bar_x - 3, bar_y - 3, bar_x + bar_w + 3, bar_y + bar_h + 3], radius=16, fill=(15, 23, 42, 220), outline=(71, 85, 105, 255), width=2)
                     if fill_w > 8:
-                        # Bar color adapts (Green -> Yellow -> Coral)
                         if time_left_frac > 0.5:
-                            bar_color = (34, 197, 94)
+                            bar_color = (34, 197, 94) # Green
                         elif time_left_frac > 0.25:
-                            bar_color = (234, 179, 8)
+                            bar_color = (245, 158, 11) # Amber
                         else:
-                            bar_color = (239, 68, 68)
-                        draw.rounded_rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=12, fill=bar_color)
+                            bar_color = (239, 68, 68) # Red
+                        draw.rounded_rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=13, fill=bar_color)
 
                 else:
-                    # Reveal phase: Highlight reason at bottom
-                    draw.rounded_rectangle([80, 1360, 1000, 1540], radius=24, fill=(15, 23, 42, 220), outline=(34, 197, 94, 255), width=3)
-                    draw_text_with_outline(draw, r_data["reason_text"], (540, 1450), font_reason, fill=(255, 255, 255), outline=(0, 0, 0), outline_width=5)
+                    # Reveal Phase: Reason Card
+                    draw.rounded_rectangle([70, 1340, 1010, 1550], radius=30, fill=(15, 23, 42, 235), outline=(34, 197, 94, 255), width=4)
+                    draw.rounded_rectangle([82, 1352, 998, 1538], radius=22, outline=(74, 222, 128, 90), width=2)
+                    
+                    # Centered Reason Text
+                    draw_text_with_shadow(draw, r_data["reason_text"], (540, 1445), font_reason_main, fill=(255, 255, 255), outline=(15, 23, 42), outline_width=5)
 
-            # Write frame to FFmpeg stdin
+            # Stream raw frame to FFmpeg
             proc.stdin.write(frame.tobytes())
 
             if progress_cb and f % 30 == 0:
@@ -802,16 +833,38 @@ def render_odd_one_out_video(rounds, bg_path, output_path="odd-one-out.mp4", pro
 
 def main():
     parser = argparse.ArgumentParser(description="Odd One Out — Kids Video Generator")
-    parser.add_argument("--random", type=int, default=None, help="Build N fresh random rounds (default: 5)")
+    parser.add_argument("-r", "--rounds", type=int, default=None, help="Number of rounds (default: 5)")
+    parser.add_argument("--random", type=int, default=None, help="Alias for --rounds N")
+    parser.add_argument("-w", "--wait-time", type=float, default=DEFAULT_WAIT_TIME_SEC, help="Wait time before reveal in seconds (default: 5.0)")
+    parser.add_argument("--guess-time", type=float, default=None, help="Alias for --wait-time")
+    parser.add_argument("--reveal-time", type=float, default=DEFAULT_REVEAL_TIME_SEC, help="Reveal display duration in seconds (default: 2.0)")
     parser.add_argument("--sample", action="store_true", help="Use editable ROUNDS list at top of script")
-    parser.add_argument("--background", default=None, help="Background image filename or path")
-    parser.add_argument("--out", default="odd-one-out.mp4", help="Output MP4 file path (default: odd-one-out.mp4)")
+    parser.add_argument("-b", "--background", default=None, help="Background image filename or path")
+    parser.add_argument("-o", "--out", default="odd-one-out.mp4", help="Output MP4 file path (default: odd-one-out.mp4)")
     parser.add_argument("--sets", default="sets", help="Sets directory (default: sets)")
     args = parser.parse_args()
+
+    # Determine rounds count
+    num_rounds = 5
+    if args.rounds is not None:
+        num_rounds = args.rounds
+    elif args.random is not None:
+        num_rounds = args.random
+
+    # Determine wait time
+    wait_time = args.wait_time
+    if args.guess_time is not None:
+        wait_time = args.guess_time
+
+    reveal_time = args.reveal_time
 
     print("==================================================")
     print("  ODD ONE OUT — Kids Video Generator")
     print("==================================================")
+    print(f" • Rounds: {num_rounds}")
+    print(f" • Wait Time (Guess Phase): {wait_time}s")
+    print(f" • Reveal Time: {reveal_time}s")
+    print(f" • Output File: {args.out}")
 
     if not check_ffmpeg():
         print("\n[ERROR] FFmpeg is missing from your system PATH!")
@@ -823,7 +876,7 @@ def main():
     # 1. Discover categories
     categories = discover_categories(args.sets)
     cat_summary = [f"{c} ({len(items)} items)" for c, items in categories.items()]
-    print(f"Discovered categories: {', '.join(cat_summary) if cat_summary else 'None'}")
+    print(f"\nDiscovered categories: {', '.join(cat_summary) if cat_summary else 'None'}")
 
     if len(categories) < 2:
         print("[ERROR] Need at least 2 non-empty categories to generate Odd One Out rounds.")
@@ -844,11 +897,10 @@ def main():
 
     # 3. Build rounds
     if args.sample:
-        print("Using editable ROUNDS list...")
+        print("\nUsing editable ROUNDS list...")
         rounds = build_sample_rounds(categories)
     else:
-        num_rounds = args.random if args.random is not None else 5
-        print(f"Building {num_rounds} random rounds...")
+        print(f"\nBuilding {num_rounds} random rounds...")
         rounds = build_random_rounds(categories, count=num_rounds)
 
     print(f"Rounds configured: {len(rounds)}")
@@ -864,6 +916,8 @@ def main():
         rounds=rounds,
         bg_path=bg_path,
         output_path=args.out,
+        wait_time_sec=wait_time,
+        reveal_time_sec=reveal_time,
         progress_cb=lambda frac, text: print(f"[{int(frac * 100)}%] {text}")
     )
     print("\n[Done] Video generation complete!")
