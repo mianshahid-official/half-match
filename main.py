@@ -10,7 +10,6 @@ import argparse
 # Add current directory to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from gui import main as run_gui
 import engine
 
 def cli_generate(args):
@@ -77,6 +76,13 @@ def main():
         args = parser.parse_args()
         cli_generate(args)
     else:
+        try:
+            from gui import main as run_gui
+        except ImportError as e:
+            print(f"Error: Could not load GUI dependencies ({e}).")
+            print("PySide6 is required to run the desktop GUI.")
+            print("Please install PySide6: pip install PySide6")
+            sys.exit(1)
         run_gui()
 
 if __name__ == "__main__":
